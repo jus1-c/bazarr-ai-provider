@@ -62,7 +62,9 @@ docker compose up -d --build
 
 After building the custom Bazarr image, enable `aiproxy` in Bazarr.
 
-If the UI shows it as a provider, enable it there.
+The custom image patches Bazarr's frontend provider list so `AI Proxy` should appear in Settings -> Providers -> `+`.
+
+If your browser still does not show it after rebuilding, clear Bazarr's PWA/service-worker cache or test in an incognito window. Bazarr's frontend assets are precached by the browser.
 
 If not, stop Bazarr and add `aiproxy` to `/config/config/config.yaml`:
 
