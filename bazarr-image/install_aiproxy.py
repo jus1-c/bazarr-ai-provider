@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+import time
 
 
 PROVIDER_SOURCE = Path("/tmp/aiproxy.py")
@@ -47,6 +48,13 @@ def patch_frontend_provider_list() -> None:
 
     if not patched:
         raise RuntimeError("Could not patch Bazarr frontend provider list")
+
+    service_worker = Path("/app/bazarr/bin/frontend/build/sw.js")
+    if service_worker.exists():
+        content = service_worker.read_text(encoding="utf-8", errors="ignore")
+        marker = "// aiproxy-provider-ui-patch"
+        if marker not in content:
+            service_worker.write_text(f"{content}\n{marker}-{int(time.time())}\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
