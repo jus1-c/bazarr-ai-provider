@@ -109,6 +109,7 @@ class AIProxyProvider(Provider):
         self.ai_fallback_max_candidates = _env_int("AIPROXY_AI_FALLBACK_MAX_CANDIDATES", 10)
         self.worker_fallback = _env_bool("AIPROXY_WORKER_FALLBACK", True)
         self.max_results = _env_int("AIPROXY_MAX_RESULTS", 25)
+        self.profile_languages_enabled = _env_bool("AIPROXY_PROFILE_LANGUAGES_ENABLED", True)
         self.verbose = _env_bool("AIPROXY_VERBOSE", False)
         self.session = None
 
@@ -116,11 +117,12 @@ class AIProxyProvider(Provider):
         self.session = Session()
         self.session.headers.update({"User-Agent": "Bazarr-AIProxy/0.1"})
         _vlog(
-            "initialized endpoint=%s builtin=%s ai_fallback=%s worker_fallback=%s max_results=%s",
+            "initialized endpoint=%s builtin=%s ai_fallback=%s worker_fallback=%s profile_languages=%s max_results=%s",
             self.endpoint,
             self.builtin_enabled,
             self.ai_fallback_enabled,
             self.worker_fallback,
+            self.profile_languages_enabled,
             self.max_results,
         )
 
@@ -132,29 +134,58 @@ class AIProxyProvider(Provider):
         if not self.session:
             self.initialize()
 
+        requested_languages = list(languages)
+        target_languages = _target_languages(video, requested_languages, self.profile_languages_enabled)
+
         _vlog(
-            "search start video=%s languages=%s",
+            "search start video=%s requested_languages=%s target_languages=%s",
             _video_summary(video),
-            [_language_summary(language) for language in languages],
+            [_language_summary(language) for language in requested_languages],
+            [_language_summary(language) for language in target_languages],
         )
 
-        if self.builtin_enabled:
-            media_type, original_subtitles = _search_builtin_subtitles(video, languages)
-            subtitles = _list_builtin_subtitles(video, languages, media_type, original_subtitles, self.max_results)
-            _vlog("builtin strict results=%s raw_candidates=%s", len(subtitles), len(original_subtitles))
-            if subtitles:
-                _vlog("returning builtin strict candidates=%s", [_subtitle_summary(item) for item in subtitles])
-                return subtitles
+        subtitles = []
+        missing_languages = list(target_languages)
 
-            if self.ai_fallback_enabled:
-                subtitles = self._list_ai_fallback_subtitles(video, languages, media_type, original_subtitles)
-                _vlog("AI fallback results=%s", len(subtitles))
-                if subtitles:
-                    _vlog("returning AI fallback candidates=%s", [_subtitle_summary(item) for item in subtitles])
-                    return subtitles
+        if self.builtin_enabled:
+            media_type, original_subtitles = _search_builtin_subtitles(video, target_languages)
+            subtitles = _list_builtin_subtitles(video, target_languages, media_type, original_subtitles)
+            missing_languages = _missing_languages(target_languages, subtitles)
+            _vlog("builtin strict results=%s raw_candidates=%s", len(subtitles), len(original_subtitles))
+
+            if self.ai_fallback_enabled and missing_languages:
+                ai_subtitles = self._list_ai_fallback_subtitles(video, missing_languages, media_type, original_subtitles)
+                subtitles = _dedupe_subtitles([*subtitles, *ai_subtitles])
+                missing_languages = _missing_languages(target_languages, subtitles)
+                _vlog(
+                    "AI fallback results=%s remaining_missing=%s",
+                    len(ai_subtitles),
+                    [_language_summary(language) for language in missing_languages],
+                )
 
         if not self.worker_fallback:
+            if subtitles:
+                return _sorted_subtitles(subtitles, self.max_results)
             _vlog("worker fallback disabled; returning no candidates")
+            return []
+
+        if missing_languages:
+            worker_subtitles = self._list_worker_fallback_subtitles(video, missing_languages)
+            subtitles = _dedupe_subtitles([*subtitles, *worker_subtitles])
+            missing_languages = _missing_languages(target_languages, subtitles)
+            _vlog(
+                "worker fallback results=%s remaining_missing=%s",
+                len(worker_subtitles),
+                [_language_summary(language) for language in missing_languages],
+            )
+
+        subtitles = _sorted_subtitles(subtitles, self.max_results)
+        if subtitles:
+            _vlog("returning candidates=%s", [_subtitle_summary(item) for item in subtitles])
+        return subtitles
+
+    def _list_worker_fallback_subtitles(self, video, languages):
+        if not languages:
             return []
 
         payload = {
@@ -174,8 +205,7 @@ class AIProxyProvider(Provider):
             logger.exception("aiproxy search failed: %r", error)
             return []
 
-        requested_languages = list(languages)
-        fallback_language = requested_languages[0] if requested_languages else None
+        fallback_language = languages[0] if languages else None
         subtitles = []
         for candidate in response.json().get("subtitles", []):
             language = _language_from_candidate(candidate, fallback_language)
@@ -255,6 +285,110 @@ class AIProxyProvider(Provider):
         return sorted(accepted, key=lambda item: item.score or 0, reverse=True)[: self.max_results]
 
 
+def _target_languages(video, requested_languages, profile_languages_enabled):
+    if not profile_languages_enabled:
+        return list(requested_languages)
+
+    profile_languages = _profile_languages_for_video(video)
+    if not profile_languages:
+        return list(requested_languages)
+
+    merged = _dedupe_languages([*profile_languages, *requested_languages])
+    _vlog(
+        "profile language expansion profile_languages=%s merged=%s",
+        [_language_summary(language) for language in profile_languages],
+        [_language_summary(language) for language in merged],
+    )
+    return merged
+
+
+def _profile_languages_for_video(video):
+    media_type = "series" if isinstance(video, Episode) else "movie"
+    profile_id = _profile_id_for_video(video, media_type)
+    if profile_id is None:
+        return []
+
+    try:
+        from app.database import get_profiles_list
+
+        profile = get_profiles_list(profile_id=int(profile_id))
+    except Exception as error:
+        _vlog("profile language lookup failed profile_id=%s error=%r", profile_id, error)
+        logger.debug("aiproxy could not load language profile %s", profile_id, exc_info=True)
+        return []
+
+    if not profile:
+        return []
+
+    languages = []
+    for item in profile.get("items") or []:
+        language = _language_from_profile_item(item)
+        if language is not None:
+            languages.append(language)
+    return _dedupe_languages(languages)
+
+
+def _profile_id_for_video(video, media_type):
+    path = getattr(video, "original_path", None)
+    if not path:
+        return None
+
+    try:
+        from app.database import TableEpisodes, TableMovies, TableShows, database, select
+        from utilities.path_mappings import path_mappings
+
+        candidate_paths = [path]
+        try:
+            mapped_path = (
+                path_mappings.path_replace_reverse(path)
+                if media_type == "series"
+                else path_mappings.path_replace_reverse_movie(path)
+            )
+            if mapped_path and mapped_path not in candidate_paths:
+                candidate_paths.append(mapped_path)
+        except Exception:
+            logger.debug("aiproxy could not reverse path mapping for profile lookup", exc_info=True)
+
+        if media_type == "series":
+            row = database.execute(
+                select(TableShows.profileId)
+                .select_from(TableEpisodes)
+                .join(TableShows)
+                .where(TableEpisodes.path.in_(candidate_paths))
+            ).first()
+        else:
+            row = database.execute(
+                select(TableMovies.profileId)
+                .where(TableMovies.path.in_(candidate_paths))
+            ).first()
+    except Exception as error:
+        _vlog("profile id lookup failed media_type=%s error=%r", media_type, error)
+        logger.debug("aiproxy could not resolve language profile for video", exc_info=True)
+        return None
+
+    profile_id = getattr(row, "profileId", None) if row else None
+    _vlog("profile id lookup media_type=%s profile_id=%s", media_type, profile_id)
+    return profile_id
+
+
+def _language_from_profile_item(item):
+    try:
+        from languages.get_languages import alpha3_from_alpha2
+        from subtitles.utils import _get_lang_obj
+
+        alpha3 = alpha3_from_alpha2(item.get("language"))
+        language = _get_lang_obj(alpha3)
+        if item.get("forced") == "True":
+            language = Language.rebuild(language, forced=True)
+        if item.get("hi") == "True":
+            language = Language.rebuild(language, hi=True)
+        return language
+    except Exception as error:
+        _vlog("profile language item skipped item=%s error=%r", item, error)
+        logger.debug("aiproxy could not build profile language from item", exc_info=True)
+        return None
+
+
 def _search_builtin_subtitles(video, languages):
     media_type = "series" if isinstance(video, Episode) else "movie"
     try:
@@ -278,7 +412,7 @@ def _search_builtin_subtitles(video, languages):
         return media_type, []
 
 
-def _list_builtin_subtitles(video, languages, media_type, original_subtitles, max_results):
+def _list_builtin_subtitles(video, languages, media_type, original_subtitles, max_results=None):
     if not original_subtitles:
         return []
 
@@ -289,7 +423,10 @@ def _list_builtin_subtitles(video, languages, media_type, original_subtitles, ma
             continue
         wrapped.append(AIProxySubtitle(_language_from_candidate(candidate, original.language), candidate))
 
-    return sorted(wrapped, key=lambda item: item.score or 0, reverse=True)[:max_results]
+    wrapped = sorted(wrapped, key=lambda item: item.score or 0, reverse=True)
+    if max_results is None:
+        return wrapped
+    return wrapped[:max_results]
 
 
 def _download_builtin_subtitle(subtitle):
@@ -558,6 +695,51 @@ def _matching_requested_language(language, requested_languages):
             continue
         return requested
     return None
+
+
+def _missing_languages(languages, subtitles):
+    missing = []
+    for language in languages:
+        if any(_matching_requested_language(getattr(subtitle, "language", None), [language]) for subtitle in subtitles):
+            continue
+        missing.append(language)
+    return missing
+
+
+def _dedupe_languages(languages):
+    deduped = []
+    seen = set()
+    for language in languages:
+        key = _language_key(language)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(language)
+    return deduped
+
+
+def _language_key(language):
+    return (
+        getattr(language, "basename", None) or getattr(language, "alpha3", None) or str(language),
+        bool(getattr(language, "forced", False)),
+        bool(getattr(language, "hi", False)),
+    )
+
+
+def _dedupe_subtitles(subtitles):
+    deduped = []
+    seen = set()
+    for subtitle in subtitles:
+        key = getattr(subtitle, "candidate_id", None) or id(subtitle)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(subtitle)
+    return deduped
+
+
+def _sorted_subtitles(subtitles, max_results):
+    return sorted(subtitles, key=lambda item: item.score or 0, reverse=True)[:max_results]
 
 
 def _has_id_match(matches):

@@ -12,6 +12,7 @@ services:
       AIPROXY_ENDPOINT: http://bazarr-ai-provider:8787
       AIPROXY_TIMEOUT: "60"
       AIPROXY_VERBOSE: "false"
+      AIPROXY_PROFILE_LANGUAGES_ENABLED: "true"
       AIPROXY_BUILTIN_ENABLED: "true"
       AIPROXY_AI_FALLBACK_ENABLED: "true"
       AIPROXY_AI_FALLBACK_MAX_CANDIDATES: "10"

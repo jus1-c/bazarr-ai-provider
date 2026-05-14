@@ -16,7 +16,7 @@ The Bazarr provider stays inside Bazarr's normal provider pipeline. The worker d
 
 - Built-in backend: every Bazarr provider currently enabled, excluding `aiproxy` itself.
 - Worker fallback backend: Subsource first.
-- Language: whatever Bazarr requests, if mapped in `worker/app/language_map.py`.
+- Language: Bazarr language profile when it can be resolved from the media path; otherwise whatever Bazarr requests.
 - AI: optional local OpenAI-compatible `/v1/chat/completions` endpoint.
 - Import: handled by Bazarr provider pipeline, not by the worker.
 
@@ -27,13 +27,16 @@ The Bazarr provider stays inside Bazarr's normal provider pipeline. The worker d
 1. Inside Bazarr, `aiproxy` creates a Bazarr provider pool using existing provider credentials from Bazarr settings.
 2. It searches enabled providers except `aiproxy` to avoid recursion.
 3. It scores candidates using Bazarr's own `ComputeScore`, minimum score, blacklist, throttling, and provider configs.
-4. If any candidate passes Bazarr's built-in threshold, it is returned through `aiproxy` and downloaded through the original provider.
-5. If no built-in candidate passes, `aiproxy` keeps relaxed candidates from all configured providers when they match the requested language and an ID/hash match.
-6. Those relaxed candidates are sent to the worker `/v1/score` endpoint for AI scoring.
-7. If AI accepts a relaxed candidate, `aiproxy` returns it and downloads it through the original provider.
-8. If AI accepts nothing, `aiproxy` can still call the worker `/v1/search` endpoint for enhanced Subsource title fallback.
+4. It resolves the media language profile from Bazarr's database when possible, so a single-provider call can still search every profile language.
+5. Candidates that pass Bazarr's built-in threshold are returned through `aiproxy` and downloaded through the original provider.
+6. For profile languages that still have no built-in result, `aiproxy` keeps relaxed candidates from all configured providers when they match that missing language and an ID/hash match.
+7. Those relaxed candidates are sent to the worker `/v1/score` endpoint for AI scoring.
+8. If AI accepts a relaxed candidate, `aiproxy` returns it and downloads it through the original provider.
+9. If a language is still missing after AI scoring, `aiproxy` can call the worker `/v1/search` endpoint for enhanced Subsource title fallback for that language.
 
 This keeps Bazarr's normal rules first and uses AI only as a rescue path across all configured providers.
+
+Set `AIPROXY_PROFILE_LANGUAGES_ENABLED=false` to disable language-profile expansion and use only the languages Bazarr passes into the provider call.
 
 ## Build
 
@@ -129,6 +132,7 @@ Enable verbose logs when debugging provider decisions:
 
 ```env
 AIPROXY_VERBOSE=true
+AIPROXY_PROFILE_LANGUAGES_ENABLED=true
 VERBOSE_LOGS=true
 LOG_LEVEL=INFO
 ```
@@ -149,10 +153,10 @@ For `Witch Hat Atelier`, run a manual search in Bazarr after enabling `aiproxy`.
 Expected behavior:
 
 - Bazarr invokes `aiproxy` as a normal provider.
-- `aiproxy` first tries Bazarr's built-in providers and built-in score rules.
-- If built-in providers find a good result, `aiproxy` returns that result immediately.
-- If built-in scoring fails, `aiproxy` asks AI to score relaxed candidates from all configured providers that have matching ID/hash and target language.
-- If AI accepts nothing, the worker tries enhanced Subsource by IMDb or title fallback.
+- `aiproxy` resolves the media language profile and first tries Bazarr's built-in providers and built-in score rules.
+- If built-in providers find a good result for a language, `aiproxy` returns that result without AI.
+- If a profile language still has no built-in result, `aiproxy` asks AI to score relaxed candidates from all configured providers that have matching ID/hash and target language.
+- If AI accepts nothing for a missing language, the worker tries enhanced Subsource by IMDb or title fallback for that language.
 - Worker accepts candidates that match requested language, season, and episode.
 - Bazarr downloads and saves the selected subtitle through its normal flow.
 
