@@ -32,16 +32,15 @@ class VideoRequest(BaseModel):
     streaming_service: str | None = None
 
 
-class SearchRequest(BaseModel):
-    video: VideoRequest
-    languages: list[LanguageRequest]
-
-
 class ScoreCandidateRequest(BaseModel):
     id: str
     provider: str
     provider_id: str
     language: LanguageRequest
+    origin: str | None = None
+    source_provider: str | None = None
+    original_subtitle: str | None = None
+    media_type: str | None = None
     rule_score: int = 0
     matches: list[str] = Field(default_factory=list)
     release_info: list[str] = Field(default_factory=list)
@@ -49,6 +48,14 @@ class ScoreCandidateRequest(BaseModel):
     uploader: str | None = None
     forced: bool = False
     hearing_impaired: bool = False
+    original_format: bool = True
+    hash_verifiable: bool = False
+
+
+class SearchRequest(BaseModel):
+    video: VideoRequest
+    languages: list[LanguageRequest]
+    candidates: list[ScoreCandidateRequest] = Field(default_factory=list)
 
 
 class ScoreRequest(BaseModel):
@@ -69,6 +76,10 @@ class SubtitleCandidate(BaseModel):
     provider: str
     provider_id: str
     language: LanguageRequest
+    origin: str | None = None
+    source_provider: str | None = None
+    original_subtitle: str | None = None
+    media_type: str | None = None
     score: int
     rule_score: int
     ai_score: int | None = None
@@ -79,6 +90,7 @@ class SubtitleCandidate(BaseModel):
     forced: bool = False
     hearing_impaired: bool = False
     original_format: bool = True
+    hash_verifiable: bool = False
     extra: dict[str, Any] = Field(default_factory=dict)
 
 

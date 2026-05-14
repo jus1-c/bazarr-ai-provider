@@ -23,35 +23,109 @@ class SearchService:
     def search(self, request: SearchRequest) -> list[SubtitleCandidate]:
         config = load_bazarr_config(self.settings.bazarr_config_path)
         api_key = subsource_api_key(config, self.settings.subsource_api_key)
-        if not api_key:
-            logger.warning("Subsource API key missing; returning no aiproxy results")
-            return []
 
         vlog(
             logger,
-            "worker enhanced search start media_type=%s title=%r season=%s episode=%s languages=%s config_loaded=%s proxy_configured=%s",
+            "worker enhanced search start media_type=%s title=%r season=%s episode=%s languages=%s provider_candidates=%s config_loaded=%s proxy_configured=%s",
             request.video.media_type,
             request.video.title,
             request.video.season,
             request.video.episode,
             [language.model_dump() for language in request.languages],
+            len(request.candidates),
             bool(config),
             bool(proxy_url(config)),
         )
 
-        client = SubsourceClient(api_key=api_key, timeout=self.settings.http_timeout, proxy=proxy_url(config))
-        try:
-            candidates = []
-            for language in request.languages:
-                language_candidates = self._search_language(client, request, language)
-                vlog(logger, "worker enhanced search language=%s accepted=%s", language.model_dump(), len(language_candidates))
-                candidates.extend(language_candidates)
-        finally:
-            client.close()
+        candidates = self._score_provided_candidates(request)
+
+        if api_key:
+            client = SubsourceClient(api_key=api_key, timeout=self.settings.http_timeout, proxy=proxy_url(config))
+            try:
+                for language in request.languages:
+                    language_candidates = self._search_language(client, request, language)
+                    vlog(logger, "worker enhanced search language=%s accepted=%s", language.model_dump(), len(language_candidates))
+                    candidates.extend(language_candidates)
+            finally:
+                client.close()
+        else:
+            logger.warning("Subsource API key missing; skipping Subsource worker fallback")
 
         unique = {candidate.id: candidate for candidate in candidates}
         results = sorted(unique.values(), key=lambda item: item.score, reverse=True)[: self.settings.max_candidates]
         logger.info("worker enhanced search complete unique=%s returned=%s", len(unique), len(results))
+        return results
+
+    def _score_provided_candidates(self, request: SearchRequest) -> list[SubtitleCandidate]:
+        results = []
+        for candidate in request.candidates:
+            if not _language_matches(candidate.language, request.languages):
+                continue
+
+            raw = candidate.model_dump()
+            raw["provider"] = candidate.source_provider or candidate.provider
+            raw["language_alpha3"] = candidate.language.alpha3
+            raw["forced"] = candidate.forced
+            raw["hearing_impaired"] = candidate.hearing_impaired
+            ai_score = ai_score_candidate(self.settings, request.video, raw, candidate.rule_score, force=True)
+            final_score = ai_score if ai_score is not None else candidate.rule_score
+            if ai_score is None or ai_score < self.settings.ai_threshold:
+                vlog(
+                    logger,
+                    "worker provider candidate reject id=%s provider=%s rule_score=%s ai_score=%s final_score=%s threshold=%s matches=%s release=%s",
+                    candidate.id,
+                    candidate.source_provider or candidate.provider,
+                    candidate.rule_score,
+                    ai_score,
+                    final_score,
+                    self.settings.ai_threshold,
+                    candidate.matches,
+                    candidate.release_info,
+                )
+                continue
+
+            raw["score"] = final_score
+            raw["rule_score"] = candidate.rule_score
+            raw["ai_score"] = ai_score
+            raw["matches"] = candidate.matches
+            self.cache.set(candidate.id, raw)
+            vlog(
+                logger,
+                "worker provider candidate accept id=%s provider=%s score=%s rule_score=%s ai_score=%s matches=%s release=%s",
+                candidate.id,
+                candidate.source_provider or candidate.provider,
+                final_score,
+                candidate.rule_score,
+                ai_score,
+                candidate.matches,
+                candidate.release_info,
+            )
+            results.append(
+                SubtitleCandidate(
+                    id=candidate.id,
+                    provider=candidate.provider,
+                    provider_id=candidate.provider_id,
+                    language=candidate.language,
+                    origin=candidate.origin,
+                    source_provider=candidate.source_provider,
+                    original_subtitle=candidate.original_subtitle,
+                    media_type=candidate.media_type,
+                    score=final_score,
+                    rule_score=candidate.rule_score,
+                    ai_score=ai_score,
+                    matches=candidate.matches,
+                    release_info=candidate.release_info,
+                    page_link=candidate.page_link,
+                    uploader=candidate.uploader,
+                    forced=candidate.forced,
+                    hearing_impaired=candidate.hearing_impaired,
+                    original_format=candidate.original_format,
+                    hash_verifiable=candidate.hash_verifiable,
+                    extra={"source_provider": candidate.source_provider or candidate.provider},
+                )
+            )
+        if request.candidates:
+            logger.info("worker provider candidates complete input=%s accepted=%s", len(request.candidates), len(results))
         return results
 
     def score(self, request: ScoreRequest) -> list[ScoredCandidate]:
@@ -153,3 +227,19 @@ class SearchService:
                 )
             )
         return results
+
+
+def _language_matches(language: LanguageRequest, requested_languages: list[LanguageRequest]) -> bool:
+    for requested in requested_languages:
+        if requested.alpha3 and language.alpha3 != requested.alpha3:
+            continue
+        if requested.basename and language.basename and language.basename != requested.basename:
+            continue
+        if requested.forced and not language.forced:
+            continue
+        if not requested.forced and language.forced:
+            continue
+        if requested.hi and not language.hi:
+            continue
+        return True
+    return False

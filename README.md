@@ -15,7 +15,7 @@ The Bazarr provider stays inside Bazarr's normal provider pipeline. The worker d
 ## Current Scope
 
 - Built-in backend: every Bazarr provider currently enabled, excluding `aiproxy` itself.
-- Worker fallback backend: Subsource first.
+- Worker fallback backend: AI-scored candidates passed from Bazarr's configured providers, then Subsource.
 - Language: Bazarr language profile when it can be resolved from the media path; otherwise whatever Bazarr requests.
 - AI: optional local OpenAI-compatible `/v1/chat/completions` endpoint.
 - Import: handled by Bazarr provider pipeline, not by the worker.
@@ -30,9 +30,9 @@ The Bazarr provider stays inside Bazarr's normal provider pipeline. The worker d
 4. It resolves the media language profile from Bazarr's database when possible, so a single-provider call can still search every profile language.
 5. Candidates that pass Bazarr's built-in threshold are returned through `aiproxy` and downloaded through the original provider.
 6. For profile languages that still have no built-in result, `aiproxy` keeps relaxed candidates from all configured providers when they match that missing language and an ID/hash match.
-7. Those relaxed candidates are sent to the worker `/v1/score` endpoint for AI scoring.
-8. If AI accepts a relaxed candidate, `aiproxy` returns it and downloads it through the original provider.
-9. If a language is still missing after AI scoring, `aiproxy` can call the worker `/v1/search` endpoint for enhanced Subsource title fallback for that language.
+7. `aiproxy` calls the worker `/v1/search` endpoint with those relaxed candidates for AI scoring.
+8. If AI accepts a relaxed provider candidate, `aiproxy` returns it and downloads it through the original provider.
+9. If a language is still missing, `/v1/search` also runs worker-side enhanced Subsource title fallback for that language.
 
 This keeps Bazarr's normal rules first and uses AI only as a rescue path across all configured providers.
 
@@ -112,7 +112,7 @@ environment:
   AI_ENABLED: "true"
 ```
 
-In the current `builtin-first` flow, built-in provider candidates that pass Bazarr's own score are returned without AI. AI is only used for relaxed fallback candidates that have target language plus an ID/hash match.
+In the current `builtin-first` flow, built-in provider candidates that pass Bazarr's own score are returned without AI. AI is used for relaxed fallback candidates from all configured Bazarr providers when they have target language plus an ID/hash match. The worker also uses AI while scoring its own Subsource fallback candidates.
 
 ## Health Check
 

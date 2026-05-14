@@ -146,6 +146,8 @@ class AIProxyProvider(Provider):
 
         subtitles = []
         missing_languages = list(target_languages)
+        media_type = "series" if isinstance(video, Episode) else "movie"
+        original_subtitles = []
 
         if self.builtin_enabled:
             media_type, original_subtitles = _search_builtin_subtitles(video, target_languages)
@@ -153,7 +155,7 @@ class AIProxyProvider(Provider):
             missing_languages = _missing_languages(target_languages, subtitles)
             _vlog("builtin strict results=%s raw_candidates=%s", len(subtitles), len(original_subtitles))
 
-            if self.ai_fallback_enabled and missing_languages:
+            if self.ai_fallback_enabled and missing_languages and not self.worker_fallback:
                 ai_subtitles = self._list_ai_fallback_subtitles(video, missing_languages, media_type, original_subtitles)
                 subtitles = _dedupe_subtitles([*subtitles, *ai_subtitles])
                 missing_languages = _missing_languages(target_languages, subtitles)
@@ -170,7 +172,7 @@ class AIProxyProvider(Provider):
             return []
 
         if missing_languages:
-            worker_subtitles = self._list_worker_fallback_subtitles(video, missing_languages)
+            worker_subtitles = self._list_worker_fallback_subtitles(video, missing_languages, media_type, original_subtitles)
             subtitles = _dedupe_subtitles([*subtitles, *worker_subtitles])
             missing_languages = _missing_languages(target_languages, subtitles)
             _vlog(
@@ -184,17 +186,27 @@ class AIProxyProvider(Provider):
             _vlog("returning candidates=%s", [_subtitle_summary(item) for item in subtitles])
         return subtitles
 
-    def _list_worker_fallback_subtitles(self, video, languages):
+    def _list_worker_fallback_subtitles(self, video, languages, media_type, original_subtitles):
         if not languages:
             return []
+
+        provider_candidates = []
+        if self.ai_fallback_enabled:
+            for original in original_subtitles or []:
+                candidate = _candidate_from_builtin_for_ai(original, video, languages, media_type)
+                if candidate is not None:
+                    provider_candidates.append(candidate)
+                if len(provider_candidates) >= self.ai_fallback_max_candidates:
+                    break
 
         payload = {
             "video": _serialize_video(video),
             "languages": [_serialize_language(language) for language in languages],
+            "candidates": [_candidate_for_worker_search_request(candidate) for candidate in provider_candidates],
         }
 
         try:
-            _vlog("worker fallback POST %s/v1/search", self.endpoint)
+            _vlog("worker fallback POST %s/v1/search provider_candidates=%s", self.endpoint, len(provider_candidates))
             response = self.session.post(
                 f"{self.endpoint}/v1/search",
                 json=payload,
@@ -626,6 +638,28 @@ def _candidate_for_ai_request(candidate):
         "uploader": candidate.get("uploader"),
         "forced": candidate.get("forced", False),
         "hearing_impaired": candidate.get("hearing_impaired", False),
+    }
+
+
+def _candidate_for_worker_search_request(candidate):
+    return {
+        "id": candidate["id"],
+        "provider": candidate.get("provider", "builtin"),
+        "source_provider": candidate.get("source_provider"),
+        "provider_id": candidate["provider_id"],
+        "origin": candidate.get("origin"),
+        "original_subtitle": candidate.get("original_subtitle"),
+        "media_type": candidate.get("media_type"),
+        "language": candidate["language"],
+        "rule_score": candidate.get("rule_score", 0),
+        "matches": candidate.get("matches", []),
+        "release_info": candidate.get("release_info", []),
+        "page_link": candidate.get("page_link"),
+        "uploader": candidate.get("uploader"),
+        "forced": candidate.get("forced", False),
+        "hearing_impaired": candidate.get("hearing_impaired", False),
+        "original_format": candidate.get("original_format", True),
+        "hash_verifiable": candidate.get("hash_verifiable", False),
     }
 
 
