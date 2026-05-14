@@ -12,6 +12,13 @@ SEASON_EPISODE_PATTERNS = (
     re.compile(r"s(?P<season>\d{1,2})\s*e(?P<episode>\d{1,3})", re.IGNORECASE),
     re.compile(r"(?P<season>\d{1,2})x(?P<episode>\d{1,3})", re.IGNORECASE),
 )
+EPISODE_LIST_PATTERN = re.compile(
+    r"(?:^|\s+-\s+|\s+–\s+|\s+—\s+|\[|\()"
+    r"(?:e(?:p(?:isode)?)?\s*)?"
+    r"(?P<episodes>\d{1,3}(?:\s*[,+&]\s*\d{1,3})*)"
+    r"(?=\s*(?:\]|\)|\[|$|[-_. ]))",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -45,7 +52,23 @@ def parse_season_episode(release_info: list[str]) -> tuple[int | None, int | Non
             match = pattern.search(item or "")
             if match:
                 return int(match.group("season")), int(match.group("episode"))
+        episodes = parse_episode_numbers([item])
+        if episodes:
+            return None, episodes[0]
     return None, None
+
+
+def parse_episode_numbers(release_info: list[str]) -> list[int]:
+    for item in release_info:
+        text = item or ""
+        for pattern in SEASON_EPISODE_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                return [int(match.group("episode"))]
+        match = EPISODE_LIST_PATTERN.search(text)
+        if match:
+            return [int(value) for value in re.findall(r"\d{1,3}", match.group("episodes"))]
+    return []
 
 
 def score_candidate(
@@ -75,15 +98,20 @@ def score_candidate(
 
     if video.media_type == "series":
         matches.add("series")
-        matches.add("season")
-        matches.add("episode")
         score += 20
         season = candidate.get("season")
         episode = candidate.get("episode")
+        episodes = candidate.get("episodes") or ([] if episode is None else [episode])
         if video.season and (season is None or season == video.season):
             score += 15
-        if video.episode and (episode is None or episode == video.episode):
+            matches.add("season")
+        elif video.season:
+            score -= 30
+        if video.episode and (not episodes or video.episode in episodes):
             score += 25
+            matches.add("episode")
+        elif video.episode:
+            score -= 50
     else:
         matches.add("title")
         score += 25

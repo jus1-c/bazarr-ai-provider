@@ -11,7 +11,7 @@ import httpx
 from .logging_utils import vlog
 from .language_map import to_subsource_language
 from .models import LanguageRequest, VideoRequest
-from .scoring import normalize_title, parse_season_episode, title_aliases
+from .scoring import normalize_title, parse_episode_numbers, parse_season_episode, title_aliases
 
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ class SubsourceClient:
                     )
         return results
 
-    def download(self, provider_id: str) -> tuple[str, str, bytes]:
+    def download(self, provider_id: str, candidate: dict | None = None) -> tuple[str, str, bytes]:
         logger.info("Subsource download provider_id=%s", provider_id)
         response = self.client.get(
             f"{self.base_url}/subtitles/{provider_id}/download",
@@ -87,7 +87,7 @@ class SubsourceClient:
         response.raise_for_status()
         content = response.content
         if zipfile.is_zipfile(io.BytesIO(content)):
-            filename, subtitle_format, data = _subtitle_from_zip(content)
+            filename, subtitle_format, data = _subtitle_from_zip(content, candidate)
             logger.info("Subsource download extracted filename=%s format=%s bytes=%s", filename, subtitle_format, len(data))
             return filename, subtitle_format, data
         logger.info("Subsource download raw bytes=%s", len(content))
@@ -149,9 +149,11 @@ class SubsourceClient:
             release_info = [release_info]
 
         season, episode = parse_season_episode(release_info)
+        episodes = parse_episode_numbers(release_info)
         if video.media_type == "series":
             season = season if season is not None else video.season
             episode = episode if episode is not None else video.episode
+            episodes = episodes or ([] if episode is None else [episode])
 
         candidate_id = _candidate_id("subsource", str(provider_id), language.alpha3 or "")
         page_link = item.get("link")
@@ -170,6 +172,9 @@ class SubsourceClient:
             "uploader": _uploader(item),
             "season": season,
             "episode": episode,
+            "episodes": episodes,
+            "target_season": video.season,
+            "target_episode": video.episode,
         }
 
 
@@ -225,7 +230,9 @@ def _candidate_id(provider: str, provider_id: str, language: str) -> str:
     return digest[:24]
 
 
-def _subtitle_from_zip(content: bytes) -> tuple[str, str, bytes]:
+def _subtitle_from_zip(content: bytes, candidate: dict | None = None) -> tuple[str, str, bytes]:
+    target_episode = (candidate or {}).get("target_episode")
+    members = []
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
         for member in archive.infolist():
             name = PurePosixPath(member.filename).name
@@ -234,5 +241,16 @@ def _subtitle_from_zip(content: bytes) -> tuple[str, str, bytes]:
                 continue
             data = archive.read(member)
             if data:
-                return name, suffix.lstrip("."), data
-    raise ValueError("No supported subtitle file found in Subsource archive")
+                members.append((name, suffix.lstrip("."), data))
+
+    if not members:
+        raise ValueError("No supported subtitle file found in Subsource archive")
+
+    if target_episode is not None and len(members) > 1:
+        for name, subtitle_format, data in members:
+            episodes = parse_episode_numbers([name])
+            if target_episode in episodes:
+                return name, subtitle_format, data
+        raise ValueError(f"No subtitle file matching episode {target_episode} found in Subsource archive")
+
+    return members[0]

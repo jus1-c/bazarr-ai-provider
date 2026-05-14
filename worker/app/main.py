@@ -19,6 +19,8 @@ logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 logger.info(
     "Bazarr AI Provider starting log_level=%s verbose=%s ai_enabled=%s openai_base_url_configured=%s",
@@ -78,7 +80,7 @@ def download(candidate_id: str) -> DownloadResponse:
 
     client = SubsourceClient(api_key=api_key, timeout=settings.http_timeout, proxy=proxy_url(config))
     try:
-        filename, subtitle_format, content = client.download(candidate["provider_id"])
+        filename, subtitle_format, content = client.download(candidate["provider_id"], candidate)
     finally:
         client.close()
 
