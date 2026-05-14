@@ -17,6 +17,8 @@ class Settings:
     ai_upper_bound: int
     max_candidates: int
     http_timeout: float
+    log_level: str
+    verbose_logs: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -32,6 +34,8 @@ class Settings:
             ai_upper_bound=_env_int("AI_UPPER_BOUND", 90),
             max_candidates=_env_int("MAX_CANDIDATES", 25),
             http_timeout=float(os.environ.get("HTTP_TIMEOUT", "30")),
+            log_level=os.environ.get("LOG_LEVEL", "INFO"),
+            verbose_logs=_env_bool("VERBOSE_LOGS", False),
         )
 
 

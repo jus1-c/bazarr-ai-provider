@@ -14,6 +14,7 @@ import hashlib
 import logging
 import os
 import pickle
+from pathlib import PurePath
 
 from requests import Session
 from subzero.language import Language
@@ -108,11 +109,20 @@ class AIProxyProvider(Provider):
         self.ai_fallback_max_candidates = _env_int("AIPROXY_AI_FALLBACK_MAX_CANDIDATES", 10)
         self.worker_fallback = _env_bool("AIPROXY_WORKER_FALLBACK", True)
         self.max_results = _env_int("AIPROXY_MAX_RESULTS", 25)
+        self.verbose = _env_bool("AIPROXY_VERBOSE", False)
         self.session = None
 
     def initialize(self):
         self.session = Session()
         self.session.headers.update({"User-Agent": "Bazarr-AIProxy/0.1"})
+        _vlog(
+            "initialized endpoint=%s builtin=%s ai_fallback=%s worker_fallback=%s max_results=%s",
+            self.endpoint,
+            self.builtin_enabled,
+            self.ai_fallback_enabled,
+            self.worker_fallback,
+            self.max_results,
+        )
 
     def terminate(self):
         if self.session:
@@ -122,18 +132,29 @@ class AIProxyProvider(Provider):
         if not self.session:
             self.initialize()
 
+        _vlog(
+            "search start video=%s languages=%s",
+            _video_summary(video),
+            [_language_summary(language) for language in languages],
+        )
+
         if self.builtin_enabled:
             media_type, original_subtitles = _search_builtin_subtitles(video, languages)
             subtitles = _list_builtin_subtitles(video, languages, media_type, original_subtitles, self.max_results)
+            _vlog("builtin strict results=%s raw_candidates=%s", len(subtitles), len(original_subtitles))
             if subtitles:
+                _vlog("returning builtin strict candidates=%s", [_subtitle_summary(item) for item in subtitles])
                 return subtitles
 
             if self.ai_fallback_enabled:
                 subtitles = self._list_ai_fallback_subtitles(video, languages, media_type, original_subtitles)
+                _vlog("AI fallback results=%s", len(subtitles))
                 if subtitles:
+                    _vlog("returning AI fallback candidates=%s", [_subtitle_summary(item) for item in subtitles])
                     return subtitles
 
         if not self.worker_fallback:
+            _vlog("worker fallback disabled; returning no candidates")
             return []
 
         payload = {
@@ -142,6 +163,7 @@ class AIProxyProvider(Provider):
         }
 
         try:
+            _vlog("worker fallback POST %s/v1/search", self.endpoint)
             response = self.session.post(
                 f"{self.endpoint}/v1/search",
                 json=payload,
@@ -160,6 +182,7 @@ class AIProxyProvider(Provider):
             if language is None:
                 continue
             subtitles.append(AIProxySubtitle(language, candidate))
+        _vlog("worker fallback returned=%s candidates=%s", len(subtitles), [_subtitle_summary(item) for item in subtitles])
         return subtitles
 
     def download_subtitle(self, subtitle):
@@ -167,9 +190,11 @@ class AIProxyProvider(Provider):
             self.initialize()
 
         if getattr(subtitle, "origin", None) == "builtin":
+            _vlog("download via builtin provider candidate=%s", _subtitle_summary(subtitle))
             return _download_builtin_subtitle(subtitle)
 
         try:
+            _vlog("download via worker candidate_id=%s provider=%s", subtitle.candidate_id, subtitle.source_provider)
             response = self.session.get(
                 f"{self.endpoint}/v1/download/{subtitle.candidate_id}",
                 timeout=self.timeout,
@@ -178,6 +203,7 @@ class AIProxyProvider(Provider):
             payload = response.json()
             subtitle.content = base64.b64decode(payload["content_b64"])
             subtitle.format = payload.get("format") or "srt"
+            _vlog("worker download complete candidate_id=%s format=%s bytes=%s", subtitle.candidate_id, subtitle.format, len(subtitle.content or b""))
         except Exception as error:
             logger.exception("aiproxy download failed for %s: %r", subtitle.candidate_id, error)
             subtitle.content = None
@@ -193,6 +219,7 @@ class AIProxyProvider(Provider):
                 break
 
         if not candidates:
+            _vlog("AI fallback skipped: no relaxed candidates with target language and ID/hash match")
             return []
 
         payload = {
@@ -200,6 +227,7 @@ class AIProxyProvider(Provider):
             "candidates": [_candidate_for_ai_request(candidate) for candidate in candidates],
         }
         try:
+            _vlog("AI fallback scoring candidates=%s", [_candidate_summary(candidate) for candidate in candidates])
             response = self.session.post(
                 f"{self.endpoint}/v1/score",
                 json=payload,
@@ -215,11 +243,13 @@ class AIProxyProvider(Provider):
         for candidate in candidates:
             scored = scored_by_id.get(candidate["id"])
             if not scored or not scored.get("accepted"):
+                _vlog("AI fallback rejected candidate=%s score_payload=%s", _candidate_summary(candidate), scored)
                 continue
             candidate["score"] = scored.get("score", candidate.get("score", 0))
             candidate["ai_score"] = scored.get("ai_score")
             candidate["rule_score"] = scored.get("rule_score", candidate.get("rule_score", 0))
             candidate["uploader"] = candidate.get("uploader") or f"AI accepted {candidate['source_provider']}"
+            _vlog("AI fallback accepted candidate=%s score_payload=%s", _candidate_summary(candidate), scored)
             accepted.append(AIProxySubtitle(_language_from_candidate(candidate, None), candidate))
 
         return sorted(accepted, key=lambda item: item.score or 0, reverse=True)[: self.max_results]
@@ -230,14 +260,19 @@ def _search_builtin_subtitles(video, languages):
     try:
         providers = _builtin_provider_names()
         if not providers:
+            _vlog("builtin search skipped: no configured providers")
             return media_type, []
+
+        _vlog("builtin search providers=%s media_type=%s", providers, media_type)
 
         pool = _builtin_pool(media_type, providers)
 
         from subliminal_patch.core_persistent import list_all_subtitles
 
         subtitles_by_video = list_all_subtitles([video], set(languages), pool)
-        return media_type, subtitles_by_video.get(video, [])
+        subtitles = subtitles_by_video.get(video, [])
+        _vlog("builtin search raw_count=%s", len(subtitles))
+        return media_type, subtitles
     except Exception as error:
         logger.exception("aiproxy builtin search failed: %r", error)
         return media_type, []
@@ -271,6 +306,7 @@ def _download_builtin_subtitle(subtitle):
         download_subtitles([original], pool)
         subtitle.content = original.content
         subtitle.format = getattr(original, "format", None) or getattr(subtitle, "format", None) or "srt"
+        _vlog("builtin download complete provider=%s candidate_id=%s format=%s bytes=%s", subtitle.source_provider, subtitle.candidate_id, subtitle.format, len(subtitle.content or b""))
     except Exception as error:
         logger.exception("aiproxy builtin download failed for %s: %r", subtitle.candidate_id, error)
         subtitle.content = None
@@ -324,21 +360,32 @@ def _builtin_pool(media_type, providers):
 def _candidate_from_builtin(subtitle, video, languages, media_type):
     try:
         score, matches = _builtin_percent_score(subtitle, video, languages, media_type)
-    except Exception:
+    except Exception as error:
+        _vlog("builtin strict reject provider=%s reason=%r", getattr(subtitle, "provider_name", None), error)
         logger.debug("aiproxy could not score builtin subtitle: %r", subtitle, exc_info=True)
         return None
 
     threshold = _builtin_threshold(media_type)
     if score < threshold:
+        _vlog(
+            "builtin strict reject provider=%s score=%s threshold=%s matches=%s release=%s",
+            getattr(subtitle, "provider_name", None),
+            score,
+            threshold,
+            sorted(matches),
+            _release_info(subtitle),
+        )
         return None
 
     source_provider = getattr(subtitle, "provider_name", None)
     if not source_provider or source_provider == "aiproxy":
+        _vlog("builtin strict reject invalid source_provider=%s", source_provider)
         return None
 
     try:
         original_payload = codecs.encode(pickle.dumps(subtitle.make_picklable()), "base64").decode()
     except Exception:
+        _vlog("builtin strict reject provider=%s reason=pickle_failed", source_provider)
         logger.debug("aiproxy could not pickle builtin subtitle: %r", subtitle, exc_info=True)
         return None
 
@@ -347,6 +394,7 @@ def _candidate_from_builtin(subtitle, video, languages, media_type):
     provider_id = str(getattr(subtitle, "id", "") or "unknown")
     digest = hashlib.sha256(f"{source_provider}:{provider_id}".encode("utf-8")).hexdigest()[:16]
     candidate_id = f"builtin:{source_provider}:{digest}"
+    _vlog("builtin strict accept provider=%s score=%s matches=%s release=%s", source_provider, score, sorted(matches), release_info)
     return {
         "id": candidate_id,
         "origin": "builtin",
@@ -374,6 +422,7 @@ def _candidate_from_builtin_for_ai(subtitle, video, languages, media_type):
     language = getattr(subtitle, "language", None)
     requested_language = _matching_requested_language(language, languages)
     if requested_language is None:
+        _vlog("AI relaxed reject provider=%s reason=language_mismatch language=%s", getattr(subtitle, "provider_name", None), _language_summary(language))
         return None
 
     try:
@@ -383,15 +432,18 @@ def _candidate_from_builtin_for_ai(subtitle, video, languages, media_type):
         return None
 
     if not _has_id_match(matches):
+        _vlog("AI relaxed reject provider=%s reason=no_id_or_hash_match matches=%s", getattr(subtitle, "provider_name", None), sorted(matches))
         return None
 
     source_provider = getattr(subtitle, "provider_name", None)
     if not source_provider or source_provider == "aiproxy":
+        _vlog("AI relaxed reject invalid source_provider=%s", source_provider)
         return None
 
     try:
         original_payload = codecs.encode(pickle.dumps(subtitle.make_picklable()), "base64").decode()
     except Exception:
+        _vlog("AI relaxed reject provider=%s reason=pickle_failed", source_provider)
         logger.debug("aiproxy could not pickle AI fallback subtitle: %r", subtitle, exc_info=True)
         return None
 
@@ -400,6 +452,7 @@ def _candidate_from_builtin_for_ai(subtitle, video, languages, media_type):
     digest = hashlib.sha256(
         f"ai:{source_provider}:{provider_id}:{str(language)}".encode("utf-8")
     ).hexdigest()[:16]
+    _vlog("AI relaxed candidate provider=%s rule_score=%s matches=%s release=%s", source_provider, rule_score, sorted(matches), _release_info(subtitle))
     return {
         "id": f"builtin-ai:{source_provider}:{digest}",
         "origin": "builtin",
@@ -580,6 +633,25 @@ def _serialize_video(video):
     }
 
 
+def _video_summary(video):
+    if isinstance(video, Episode):
+        title = getattr(video, "series", None)
+        season = getattr(video, "season", None)
+        episode = getattr(video, "episode", None)
+        label = f"series={title!r} S{season}E{episode}"
+    else:
+        label = f"movie={getattr(video, 'title', None)!r} year={getattr(video, 'year', None)}"
+    original_name = getattr(video, "original_name", None)
+    original_path = getattr(video, "original_path", None)
+    filename = original_name or (PurePath(original_path).name if original_path else None)
+    return {
+        "label": label,
+        "file": filename,
+        "imdb": getattr(video, "series_imdb_id", None) or getattr(video, "imdb_id", None),
+        "tvdb": getattr(video, "tvdb_id", None),
+    }
+
+
 def _serialize_language(language):
     return {
         "alpha3": getattr(language, "alpha3", None),
@@ -587,6 +659,44 @@ def _serialize_language(language):
         "ietf": str(language),
         "forced": bool(getattr(language, "forced", False)),
         "hi": bool(getattr(language, "hi", False)),
+    }
+
+
+def _language_summary(language):
+    if language is None:
+        return None
+    return {
+        "alpha3": getattr(language, "alpha3", None),
+        "basename": getattr(language, "basename", None),
+        "forced": bool(getattr(language, "forced", False)),
+        "hi": bool(getattr(language, "hi", False)),
+    }
+
+
+def _candidate_summary(candidate):
+    return {
+        "id": candidate.get("id"),
+        "provider": candidate.get("source_provider") or candidate.get("provider"),
+        "score": candidate.get("score"),
+        "rule_score": candidate.get("rule_score"),
+        "ai_score": candidate.get("ai_score"),
+        "language": candidate.get("language"),
+        "matches": candidate.get("matches"),
+        "release": candidate.get("release_info"),
+    }
+
+
+def _subtitle_summary(subtitle):
+    return {
+        "id": getattr(subtitle, "candidate_id", None),
+        "origin": getattr(subtitle, "origin", None),
+        "provider": getattr(subtitle, "source_provider", None),
+        "score": getattr(subtitle, "score", None),
+        "rule_score": getattr(subtitle, "rule_score", None),
+        "ai_score": getattr(subtitle, "ai_score", None),
+        "language": _language_summary(getattr(subtitle, "language", None)),
+        "matches": sorted(getattr(subtitle, "matches", []) or []),
+        "release": getattr(subtitle, "releases", None),
     }
 
 
@@ -619,3 +729,12 @@ def _env_int(name, default):
         return int(os.environ.get(name, str(default)))
     except ValueError:
         return default
+
+
+def _verbose_enabled():
+    return _env_bool("AIPROXY_VERBOSE", False)
+
+
+def _vlog(message, *args):
+    if _verbose_enabled():
+        logger.info("BAZARR AIProxy: " + message, *args)

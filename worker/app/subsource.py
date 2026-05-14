@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 
 import httpx
 
+from .logging_utils import vlog
 from .language_map import to_subsource_language
 from .models import LanguageRequest, VideoRequest
 from .scoring import normalize_title, parse_season_episode, title_aliases
@@ -22,6 +23,7 @@ class SubsourceClient:
         self.api_key = api_key
         self.base_url = "https://api.subsource.net/api/v1"
         self.client = httpx.Client(timeout=timeout, proxy=proxy, headers={"User-Agent": "Bazarr-AIProvider/0.1"})
+        vlog(logger, "Subsource client initialized timeout=%s proxy_configured=%s", timeout, bool(proxy))
 
     def close(self) -> None:
         self.client.close()
@@ -33,6 +35,15 @@ class SubsourceClient:
             return []
 
         movie_ids = self._find_movie_ids(video)
+        vlog(
+            logger,
+            "Subsource search title=%r season=%s episode=%s language=%s movie_ids=%s",
+            video.title,
+            video.season,
+            video.episode,
+            subsource_language,
+            movie_ids,
+        )
         results: list[dict] = []
         for movie_id in movie_ids:
             params = {
@@ -50,13 +61,25 @@ class SubsourceClient:
             response = self.client.get(f"{self.base_url}/subtitles", params=params)
             response.raise_for_status()
             data = response.json().get("data") or []
+            vlog(logger, "Subsource subtitles movie_id=%s returned=%s", movie_id, len(data))
             for item in data:
                 candidate = self._candidate_from_item(item, video, language)
                 if candidate:
                     results.append(candidate)
+                    vlog(
+                        logger,
+                        "Subsource candidate provider_id=%s forced=%s hi=%s season=%s episode=%s release=%s",
+                        candidate.get("provider_id"),
+                        candidate.get("forced"),
+                        candidate.get("hearing_impaired"),
+                        candidate.get("season"),
+                        candidate.get("episode"),
+                        candidate.get("release_info"),
+                    )
         return results
 
     def download(self, provider_id: str) -> tuple[str, str, bytes]:
+        logger.info("Subsource download provider_id=%s", provider_id)
         response = self.client.get(
             f"{self.base_url}/subtitles/{provider_id}/download",
             params={"api_key": self.api_key},
@@ -64,7 +87,10 @@ class SubsourceClient:
         response.raise_for_status()
         content = response.content
         if zipfile.is_zipfile(io.BytesIO(content)):
-            return _subtitle_from_zip(content)
+            filename, subtitle_format, data = _subtitle_from_zip(content)
+            logger.info("Subsource download extracted filename=%s format=%s bytes=%s", filename, subtitle_format, len(data))
+            return filename, subtitle_format, data
+        logger.info("Subsource download raw bytes=%s", len(content))
         return f"{provider_id}.srt", "srt", content
 
     def _find_movie_ids(self, video: VideoRequest) -> list[int]:
@@ -72,6 +98,7 @@ class SubsourceClient:
         seen = set()
 
         if video.imdb_id:
+            vlog(logger, "Subsource title search by imdb=%s", video.imdb_id)
             for item in self._search_titles(video, search_type="imdb", query=video.imdb_id):
                 movie_id = item.get("movieId")
                 if movie_id and movie_id not in seen:
@@ -79,8 +106,17 @@ class SubsourceClient:
                     ids.append(movie_id)
 
         for alias in _search_title_values(video):
+            vlog(logger, "Subsource title search by text=%r", alias)
             for item in self._search_titles(video, search_type="text", query=alias):
                 if not _title_matches(video, item):
+                    vlog(
+                        logger,
+                        "Subsource title rejected alias=%r title=%r alternate=%r year=%r",
+                        alias,
+                        item.get("title"),
+                        item.get("alternateTitle"),
+                        item.get("releaseYear"),
+                    )
                     continue
                 movie_id = item.get("movieId")
                 if movie_id and movie_id not in seen:
@@ -99,7 +135,9 @@ class SubsourceClient:
 
         response = self.client.get(f"{self.base_url}/movies/search", params=params)
         response.raise_for_status()
-        return response.json().get("data") or []
+        data = response.json().get("data") or []
+        vlog(logger, "Subsource title search type=%s query=%r returned=%s", search_type, query, len(data))
+        return data
 
     def _candidate_from_item(self, item: dict, video: VideoRequest, language: LanguageRequest) -> dict | None:
         provider_id = item.get("subtitleId")

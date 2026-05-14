@@ -4,6 +4,7 @@ import logging
 
 from .bazarr_config import load_bazarr_config, proxy_url, subsource_api_key
 from .cache import CandidateCache
+from .logging_utils import vlog
 from .models import LanguageRequest, ScoreRequest, ScoredCandidate, SearchRequest, SubtitleCandidate
 from .openai_client import ai_score_candidate
 from .scoring import score_candidate
@@ -26,18 +27,35 @@ class SearchService:
             logger.warning("Subsource API key missing; returning no aiproxy results")
             return []
 
+        vlog(
+            logger,
+            "worker enhanced search start media_type=%s title=%r season=%s episode=%s languages=%s config_loaded=%s proxy_configured=%s",
+            request.video.media_type,
+            request.video.title,
+            request.video.season,
+            request.video.episode,
+            [language.model_dump() for language in request.languages],
+            bool(config),
+            bool(proxy_url(config)),
+        )
+
         client = SubsourceClient(api_key=api_key, timeout=self.settings.http_timeout, proxy=proxy_url(config))
         try:
             candidates = []
             for language in request.languages:
-                candidates.extend(self._search_language(client, request, language))
+                language_candidates = self._search_language(client, request, language)
+                vlog(logger, "worker enhanced search language=%s accepted=%s", language.model_dump(), len(language_candidates))
+                candidates.extend(language_candidates)
         finally:
             client.close()
 
         unique = {candidate.id: candidate for candidate in candidates}
-        return sorted(unique.values(), key=lambda item: item.score, reverse=True)[: self.settings.max_candidates]
+        results = sorted(unique.values(), key=lambda item: item.score, reverse=True)[: self.settings.max_candidates]
+        logger.info("worker enhanced search complete unique=%s returned=%s", len(unique), len(results))
+        return results
 
     def score(self, request: ScoreRequest) -> list[ScoredCandidate]:
+        logger.info("worker AI score start candidates=%s threshold=%s", len(request.candidates), self.settings.ai_threshold)
         scored = []
         for candidate in request.candidates:
             raw = candidate.model_dump()
@@ -46,10 +64,23 @@ class SearchService:
             raw["hearing_impaired"] = candidate.hearing_impaired
             ai_score = ai_score_candidate(self.settings, request.video, raw, candidate.rule_score, force=True)
             final_score = ai_score if ai_score is not None else candidate.rule_score
+            accepted = ai_score is not None and ai_score >= self.settings.ai_threshold
+            vlog(
+                logger,
+                "worker AI score candidate id=%s provider=%s rule_score=%s ai_score=%s final_score=%s accepted=%s matches=%s release=%s",
+                candidate.id,
+                candidate.provider,
+                candidate.rule_score,
+                ai_score,
+                final_score,
+                accepted,
+                candidate.matches,
+                candidate.release_info,
+            )
             scored.append(
                 ScoredCandidate(
                     id=candidate.id,
-                    accepted=ai_score is not None and ai_score >= self.settings.ai_threshold,
+                    accepted=accepted,
                     score=final_score,
                     rule_score=candidate.rule_score,
                     ai_score=ai_score,
@@ -69,6 +100,18 @@ class SearchService:
             ai_score = ai_score_candidate(self.settings, request.video, raw, rule.score)
             final_score = ai_score if ai_score is not None else rule.score
             if final_score < self.settings.ai_threshold:
+                vlog(
+                    logger,
+                    "worker enhanced reject provider=%s provider_id=%s rule_score=%s ai_score=%s final_score=%s threshold=%s matches=%s release=%s",
+                    raw.get("provider"),
+                    raw.get("provider_id"),
+                    rule.score,
+                    ai_score,
+                    final_score,
+                    self.settings.ai_threshold,
+                    rule.matches,
+                    raw.get("release_info"),
+                )
                 continue
 
             raw["score"] = final_score
@@ -76,6 +119,17 @@ class SearchService:
             raw["ai_score"] = ai_score
             raw["matches"] = rule.matches
             self.cache.set(raw["id"], raw)
+            vlog(
+                logger,
+                "worker enhanced accept provider=%s provider_id=%s score=%s rule_score=%s ai_score=%s matches=%s release=%s",
+                raw.get("provider"),
+                raw.get("provider_id"),
+                final_score,
+                rule.score,
+                ai_score,
+                rule.matches,
+                raw.get("release_info"),
+            )
             results.append(
                 SubtitleCandidate(
                     id=raw["id"],

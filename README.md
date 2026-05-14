@@ -123,6 +123,25 @@ From inside the Docker network, Bazarr calls:
 http://bazarr-ai-provider:8787/v1/search
 ```
 
+## Verbose Logs
+
+Enable verbose logs when debugging provider decisions:
+
+```env
+AIPROXY_VERBOSE=true
+VERBOSE_LOGS=true
+LOG_LEVEL=INFO
+```
+
+Useful commands:
+
+```bash
+docker logs -f bazarr | grep "BAZARR AIProxy"
+docker logs -f bazarr-ai-provider
+```
+
+The logs include provider lists, candidate counts, reject reasons, scores, AI decisions, and download paths. Credentials/API keys are not logged.
+
 ## Test Case
 
 For `Witch Hat Atelier`, run a manual search in Bazarr after enabling `aiproxy`.

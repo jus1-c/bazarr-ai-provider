@@ -11,6 +11,7 @@ services:
       TZ: Etc/UTC
       AIPROXY_ENDPOINT: http://bazarr-ai-provider:8787
       AIPROXY_TIMEOUT: "60"
+      AIPROXY_VERBOSE: "false"
       AIPROXY_BUILTIN_ENABLED: "true"
       AIPROXY_AI_FALLBACK_ENABLED: "true"
       AIPROXY_AI_FALLBACK_MAX_CANDIDATES: "10"
@@ -42,6 +43,8 @@ services:
       AI_ENABLED: "true"
       AI_THRESHOLD: "85"
       HTTP_TIMEOUT: "30"
+      LOG_LEVEL: INFO
+      VERBOSE_LOGS: "false"
     volumes:
       - /path/to/bazarr/config:/bazarr-config:ro
       - /path/to/media:/media:ro
