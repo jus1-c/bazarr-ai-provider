@@ -1,0 +1,49 @@
+services:
+  bazarr:
+    build:
+      context: .
+      dockerfile: bazarr-image/Dockerfile
+    image: ${BAZARR_AIPROXY_IMAGE:-local/bazarr-aiproxy:latest}
+    container_name: ${BAZARR_CONTAINER_NAME:-bazarr}
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+      AIPROXY_ENDPOINT: http://bazarr-ai-provider:8787
+      AIPROXY_TIMEOUT: ${AIPROXY_TIMEOUT:-60}
+      AIPROXY_BUILTIN_ENABLED: ${AIPROXY_BUILTIN_ENABLED:-true}
+      AIPROXY_AI_FALLBACK_ENABLED: ${AIPROXY_AI_FALLBACK_ENABLED:-true}
+      AIPROXY_AI_FALLBACK_MAX_CANDIDATES: ${AIPROXY_AI_FALLBACK_MAX_CANDIDATES:-10}
+      AIPROXY_WORKER_FALLBACK: ${AIPROXY_WORKER_FALLBACK:-true}
+      AIPROXY_MAX_RESULTS: ${AIPROXY_MAX_RESULTS:-25}
+      AIPROXY_BUILTIN_PROVIDERS: ${AIPROXY_BUILTIN_PROVIDERS:-}
+    volumes:
+      - ${BAZARR_CONFIG_DIR:?Set BAZARR_CONFIG_DIR in .env}:/config
+      - ${MEDIA_DIR:?Set MEDIA_DIR in .env}:/media
+    ports:
+      - ${BAZARR_PORT:-6767}:6767
+    depends_on:
+      - bazarr-ai-provider
+    restart: unless-stopped
+
+  bazarr-ai-provider:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    image: ${BAZARR_AI_PROVIDER_IMAGE:-local/bazarr-ai-provider:latest}
+    container_name: ${BAZARR_AI_PROVIDER_CONTAINER_NAME:-bazarr-ai-provider}
+    environment:
+      BAZARR_CONFIG_PATH: /bazarr-config/config/config.yaml
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy}
+      OPENAI_MODEL: ${OPENAI_MODEL:-local-model}
+      AI_ENABLED: ${AI_ENABLED:-true}
+      AI_THRESHOLD: ${AI_THRESHOLD:-85}
+      HTTP_TIMEOUT: ${HTTP_TIMEOUT:-30}
+      SUBSOURCE_API_KEY: ${SUBSOURCE_API_KEY:-}
+    volumes:
+      - ${BAZARR_CONFIG_DIR:?Set BAZARR_CONFIG_DIR in .env}:/bazarr-config:ro
+      - ${MEDIA_DIR:?Set MEDIA_DIR in .env}:/media:ro
+    ports:
+      - ${AIPROXY_WORKER_PORT:-8787}:8787
+    restart: unless-stopped

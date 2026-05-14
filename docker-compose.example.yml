@@ -1,0 +1,50 @@
+services:
+  bazarr:
+    build:
+      context: .
+      dockerfile: bazarr-image/Dockerfile
+    image: local/bazarr-aiproxy:latest
+    container_name: bazarr
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Etc/UTC
+      AIPROXY_ENDPOINT: http://bazarr-ai-provider:8787
+      AIPROXY_TIMEOUT: "60"
+      AIPROXY_BUILTIN_ENABLED: "true"
+      AIPROXY_AI_FALLBACK_ENABLED: "true"
+      AIPROXY_AI_FALLBACK_MAX_CANDIDATES: "10"
+      AIPROXY_WORKER_FALLBACK: "true"
+      AIPROXY_MAX_RESULTS: "25"
+      # Replace mode: set Bazarr enabled_providers to only aiproxy,
+      # then list real backend providers here to avoid duplicate searches.
+      # AIPROXY_BUILTIN_PROVIDERS: subsource,opensubtitlescom,jimaku
+    volumes:
+      - /path/to/bazarr/config:/config
+      - /path/to/media:/media
+    ports:
+      - "6767:6767"
+    depends_on:
+      - bazarr-ai-provider
+    restart: unless-stopped
+
+  bazarr-ai-provider:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    image: local/bazarr-ai-provider:latest
+    container_name: bazarr-ai-provider
+    environment:
+      BAZARR_CONFIG_PATH: /bazarr-config/config/config.yaml
+      OPENAI_BASE_URL: http://local-openai-compatible:8000/v1
+      OPENAI_API_KEY: dummy
+      OPENAI_MODEL: local-model
+      AI_ENABLED: "true"
+      AI_THRESHOLD: "85"
+      HTTP_TIMEOUT: "30"
+    volumes:
+      - /path/to/bazarr/config:/bazarr-config:ro
+      - /path/to/media:/media:ro
+    ports:
+      - "8787:8787"
+    restart: unless-stopped
